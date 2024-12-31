@@ -107,7 +107,8 @@ class StrategyEngine(BaseEngine):
         if not strategy:
             return
 
-        self._call_strategy_func(strategy, strategy.update_order, order)
+        # self._call_strategy_func(strategy, strategy.update_order, order)
+        self._call_strategy_func(strategy, strategy.on_order, order)
 
     def _process_trade_event(self, event: Event) -> None:
         """Process trade data event"""
@@ -132,6 +133,7 @@ class StrategyEngine(BaseEngine):
         offset: Offset,
         price: float,
         volume: float,
+        reason: str = ""
     ) -> list:
         """Send new order"""
         contract: Optional[ContractData] = self.main_engine.get_contract(vt_symbol)

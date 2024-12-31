@@ -6,6 +6,7 @@ from vnpy_evo.trader.object import BarData, TickData, OrderData, TradeData
 from vnpy_evo.trader.utility import virtual, round_to
 
 from .table import DataTable
+from .base import StopOrder
 
 if TYPE_CHECKING:
     from .engine import StrategyEngine
@@ -23,7 +24,7 @@ class StrategyTemplate:
         strategy_engine: "StrategyEngine",
         strategy_name: str,
         vt_symbols: list[str],
-        setting: dict
+        setting: dict,
     ) -> None:
         """
         Normally no need to call this __init__ when implementing a strategy.
@@ -99,6 +100,11 @@ class StrategyTemplate:
         pass
 
     @virtual
+    def on_finish(self) -> None:
+        """Callback when strategy is finished"""
+        pass
+
+    @virtual
     def on_stop(self) -> None:
         """Callback when strategy is stoped"""
         pass
@@ -122,6 +128,13 @@ class StrategyTemplate:
     def on_order(self, order: OrderData) -> None:
         """Callback of order update"""
         pass
+    
+    @virtual
+    def on_stop_order(self, stop_order: StopOrder) -> None:
+        """
+        Callback of stop order update.
+        """
+        pass
 
     def update_trade(self, trade: TradeData) -> None:
         """Calculate strategy pos data before calling on_trade"""
@@ -129,7 +142,20 @@ class StrategyTemplate:
             self.pos_data[trade.vt_symbol] += trade.volume
         else:
             self.pos_data[trade.vt_symbol] -= trade.volume
-
+        # print(
+        #     "datetime",
+        #     trade.datetime,
+        #     "trade volume",
+        #     trade.volume,
+        #     "pos data",
+        #     self.pos_data[trade.vt_symbol],
+        #     "direction",
+        #     trade.direction,
+        #     "offset",
+        #     trade.offset,
+        #     "reason",
+        #     trade.reason,
+        # )
         self.on_trade(trade)
 
     def update_order(self, order: OrderData) -> None:
@@ -141,21 +167,37 @@ class StrategyTemplate:
 
         self.on_order(order)
 
-    def buy(self, vt_symbol: str, price: float, volume: float) -> str:
+    def buy(
+        self, vt_symbol: str, price: float, volume: float, reason: str = "", stop=False
+    ) -> str:
         """Send buy order"""
-        return self.send_order(vt_symbol, Direction.LONG, Offset.OPEN, price, volume)
+        return self.send_order(
+            vt_symbol, Direction.LONG, Offset.OPEN, price, volume, reason, stop
+        )
 
-    def sell(self, vt_symbol: str, price: float, volume: float) -> str:
+    def sell(
+        self, vt_symbol: str, price: float, volume: float, reason: str = "", stop=False
+    ) -> str:
         """Send sell order"""
-        return self.send_order(vt_symbol, Direction.SHORT, Offset.CLOSE, price, volume)
+        return self.send_order(
+            vt_symbol, Direction.SHORT, Offset.CLOSE, price, volume, reason, stop
+        )
 
-    def short(self, vt_symbol: str, price: float, volume: float) -> str:
+    def short(
+        self, vt_symbol: str, price: float, volume: float, reason: str = "", stop=False
+    ) -> str:
         """Send short order"""
-        return self.send_order(vt_symbol, Direction.SHORT, Offset.OPEN, price, volume)
+        return self.send_order(
+            vt_symbol, Direction.SHORT, Offset.OPEN, price, volume, reason, stop
+        )
 
-    def cover(self, vt_symbol: str, price: float, volume: float) -> str:
+    def cover(
+        self, vt_symbol: str, price: float, volume: float, reason: str = "", stop=False
+    ) -> str:
         """Send cover order"""
-        return self.send_order(vt_symbol, Direction.LONG, Offset.CLOSE, price, volume)
+        return self.send_order(
+            vt_symbol, Direction.LONG, Offset.CLOSE, price, volume, reason, stop
+        )
 
     def send_order(
         self,
@@ -164,6 +206,8 @@ class StrategyTemplate:
         offset: Offset,
         price: float,
         volume: float,
+        reason: str = "",
+        stop: bool = False,
     ) -> str:
         """Send new order"""
         if not self.trading:
@@ -175,11 +219,11 @@ class StrategyTemplate:
             direction=direction,
             offset=offset,
             price=price,
-            volume=volume
+            volume=volume,
+            reason=reason,
+            stop=stop,
         )
-
-        self.active_orderids.add(vt_orderid)
-
+        # self.active_orderids.add(vt_orderid)
         return vt_orderid
 
     def cancel_order(self, vt_orderid: str) -> None:
@@ -189,9 +233,13 @@ class StrategyTemplate:
 
     def cancel_all(self) -> None:
         """Cancel all active orders"""
-        for vt_orderid in list(self.active_orderids):
-            self.cancel_order(vt_orderid)
+        # for vt_orderid in list(self.active_orderids):
+        #     self.cancel_order(vt_orderid)
+        if self.trading:
+                self.strategy_engine.cancel_all(self)
+            
 
+        
     def execute_trading(self, bars: dict[str, BarData], tick_add: int) -> None:
         """Execute trading according to the difference between target and pos"""
         # Cancel all existing orders
@@ -213,10 +261,14 @@ class StrategyTemplate:
             pricetick: float = self.get_pricetick(vt_symbol)
 
             if trading_volume > 0:
-                buy_price: float = round_to(bar.close_price - pricetick * tick_add, pricetick)
+                buy_price: float = round_to(
+                    bar.close_price - pricetick * tick_add, pricetick
+                )
                 self.buy(vt_symbol, buy_price, abs(trading_volume))
             elif trading_volume < 0:
-                short_price: float = round_to(bar.close_price + pricetick * tick_add, pricetick)
+                short_price: float = round_to(
+                    bar.close_price + pricetick * tick_add, pricetick
+                )
                 self.short(vt_symbol, short_price, abs(trading_volume))
 
     def get_pos(self, vt_symbol: str) -> int:
@@ -267,7 +319,7 @@ class StrategyTemplate:
         size: int = 100,
         window: int = 1,
         interval: Interval = Interval.MINUTE,
-        extra_fields: list[str] = None
+        extra_fields: list[str] = None,
     ) -> DataTable:
         """Create a new DataTable"""
         return self.strategy_engine.new_table(

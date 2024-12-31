@@ -25,6 +25,7 @@ from vnpy_evo.trader.optimize import (
 
 from .template import StrategyTemplate
 from .table import BacktestingDataTable
+from .base import StopOrder, StopOrderStatus, STOPORDER_PREFIX
 
 
 INTERVAL_DELTA_MAP: dict[Interval, timedelta] = {
@@ -65,6 +66,10 @@ class BacktestingEngine:
 
         self.days: int = 0
         self.history_data: dict[str, dict] = defaultdict(dict)
+        
+        self.stop_order_count: int = 0
+        self.stop_orders: dict[str, StopOrder] = {}
+        self.active_stop_orders: dict[str, StopOrder] = {}
 
         self.limit_order_count: int = 0
         self.limit_orders: dict[str, OrderData] = {}
@@ -133,7 +138,7 @@ class BacktestingEngine:
         if self.start >= self.end:
             self.output("The start time must be earlier than the end time!")
             return
-
+        bar_records = []
         # Load history data of all symbols
         for vt_symbol in self.vt_symbols:
             data: list[BarData] = load_bar_data(
@@ -145,9 +150,23 @@ class BacktestingEngine:
 
             for bar in data:
                 bars: dict[str, BarData] = self.history_data.setdefault(bar.datetime, {})
+                bar_records.append({
+                    "datetime": bar.datetime,
+                    "close_price": bar.close_price,
+                    "close": bar.close_price,
+                    "open": bar.open_price,
+                    "high": bar.high_price,
+                    "low": bar.low_price,
+                    "volume": bar.volume,
+                    "turnover": bar.turnover,
+                    "open_interest": bar.open_interest
+                })
                 bars[bar.vt_symbol] = bar
 
             self.output(f"Bar data of {vt_symbol} loaded, total count: {len(data)}.")
+        # import pandas as pd
+        # bar_df = pd.DataFrame(bar_records)
+        # bar_df.to_csv("bar_records3.csv")
 
         self.output("History data all loaded.")
 
@@ -156,6 +175,9 @@ class BacktestingEngine:
         self.strategy.on_init()
 
         # Update history data into table
+        '''
+        datetime.datetime(2024, 7, 15, 22, 11, 46, 918000, tzinfo=zoneinfo.ZoneInfo(key='Asia/Shanghai')), datetime.datetime(2024, 7, 15, 22, 19, 10, 28000, tzinfo=zoneinfo.ZoneInfo(key='Asia/Shanghai')),
+        '''
         dts: list = list(self.history_data.keys())
         dts.sort()
 
@@ -197,7 +219,7 @@ class BacktestingEngine:
                 self.output("Backtesting is finished due to exception!")
                 self.output(traceback.format_exc())
                 return
-
+        self.strategy.on_finish()
         self.output("Replaying history data finished.")
 
     def calculate_result(self) -> DataFrame:
@@ -234,11 +256,15 @@ class BacktestingEngine:
             fields: list = [
                 "date", "trade_count", "turnover",
                 "commission", "slippage", "trading_pnl",
-                "holding_pnl", "total_pnl", "net_pnl"
+                "holding_pnl", "total_pnl", "net_pnl",
+                "close_prices"
             ]
             for key in fields:
                 value = getattr(daily_result, key)
-                results[key].append(value)
+                if key == "close_prices":
+                    results[key].append(list(value.values())[0])
+                else:
+                    results[key].append(value)
 
         if results:
             self.daily_df: DataFrame = DataFrame.from_dict(results).set_index("date")
@@ -278,6 +304,7 @@ class BacktestingEngine:
         daily_return: float = 0
         return_std: float = 0
         sharpe_ratio: float = 0
+        sortino_ratio: float = 0
         return_drawdown_ratio: float = 0
 
         positive_balance: bool = False
@@ -294,7 +321,13 @@ class BacktestingEngine:
             positive_balance = (df["balance"] > 0).all()
             if not positive_balance:
                 self.output("Calculation failed due to margin call during backtesting!")
-
+        '''
+        date,trade_count,turnover,commission,slippage,trading_pnl,holding_pnl,total_pnl,net_pnl,balance,return,highlevel,drawdown,ddpercent
+        2024-03-04,5,2.0808099914550784,0.000374545798461914,4.9999999999999996e-06,0.009110003662109364,0.0,0.009110003662109364,0.008730457863647451,10000.008730457863,8.730454052272659e-07,10000.008730457863,0.0,0.0
+        2024-03-05,22,8.858369989013672,0.0015945065980224609,2.2000000000000006e-05,0.08035000610351556,-0.021970001220703125,0.058380004882812433,0.05676349828478997,10000.065493956148,5.676328762422401e-06,10000.065493956148,0.0,0.0
+        '''
+        
+        # df.to_csv("daily_result.csv")
         # Calculate statistics
         if positive_balance:
             start_date = df.index[0]
@@ -331,16 +364,27 @@ class BacktestingEngine:
             daily_trade_count: int = total_trade_count / total_days
 
             total_return: float = (end_balance / self.capital - 1) * 100
+            
             annual_return: float = total_return / total_days * self.annual_days
             daily_return: float = df["return"].mean() * 100
             return_std: float = df["return"].std() * 100
+            
 
             if return_std:
                 daily_risk_free: float = self.risk_free / np.sqrt(self.annual_days)
                 sharpe_ratio: float = (daily_return - daily_risk_free) / return_std * np.sqrt(self.annual_days)
             else:
                 sharpe_ratio: float = 0
-
+            
+            downside_return = df["return"].where(df["return"] > 0, 0)
+            downside_std = downside_return.std()
+            
+            if downside_std:
+                daily_risk_free: float = self.risk_free / np.sqrt(self.annual_days)
+                sortino_ratio: float = (daily_return - daily_risk_free) / downside_std * np.sqrt(self.annual_days)
+            else:
+                sortino_ratio: float = 0
+        
             return_drawdown_ratio: float = -total_net_pnl / max_drawdown
 
         # Output result
@@ -377,6 +421,7 @@ class BacktestingEngine:
             self.output(f"Daily Return:\t{daily_return:,.2f}%")
             self.output(f"Return Std:\t{return_std:,.2f}%")
             self.output(f"Sharpe Ratio:\t{sharpe_ratio:,.2f}")
+            self.output(f"Sortino Ratio:\t{sortino_ratio:,.2f}")
             self.output(f"Return Drawdown Ratio:\t{return_drawdown_ratio:,.2f}")
 
         statistics: dict = {
@@ -405,6 +450,7 @@ class BacktestingEngine:
             "daily_return": daily_return,
             "return_std": return_std,
             "sharpe_ratio": sharpe_ratio,
+            "sortino_ratio": sortino_ratio,
             "return_drawdown_ratio": return_drawdown_ratio,
         }
 
@@ -424,19 +470,25 @@ class BacktestingEngine:
 
         if df is None:
             return
-
         fig = make_subplots(
             rows=4,
             cols=1,
             subplot_titles=["Balance", "Drawdown", "Daily PnL", "PnL Distribution"],
-            vertical_spacing=0.06
+            vertical_spacing=0.06,
+            specs=[[{"secondary_y": True}], [{}], [{}], [{}]]  # Enable secondary y-axis for the first subplot
         )
-
         balance_line = go.Scatter(
             x=df.index,
             y=df["balance"],
             mode="lines",
             name="Balance"
+        )
+        close_line = go.Scatter(
+            x=df.index,
+            y=df["close_prices"],  # Assuming 'close' is a column in your DataFrame
+            mode="lines",
+            name="Close",
+            line=dict(dash='dash')  # Optional: make the line dashed for distinction
         )
         drawdown_scatter = go.Scatter(
             x=df.index,
@@ -450,12 +502,14 @@ class BacktestingEngine:
         pnl_histogram = go.Histogram(x=df["net_pnl"], nbinsx=100, name="Days")
 
         fig.add_trace(balance_line, row=1, col=1)
+        fig.add_trace(close_line, row=1, col=1, secondary_y=True)  # Add close line to the secondary y-axis
         fig.add_trace(drawdown_scatter, row=2, col=1)
         fig.add_trace(pnl_bar, row=3, col=1)
         fig.add_trace(pnl_histogram, row=4, col=1)
 
         fig.update_layout(height=1000, width=1000)
         fig.show()
+        fig.write_image("backtest_result.png")
 
     def run_bf_optimization(
         self,
@@ -556,6 +610,7 @@ class BacktestingEngine:
         self.bars: dict[str, BarData] = self.history_data[dt]
 
         self._cross_limit_order()
+        self._cross_stop_order()
         self.strategy.on_bars(self.bars)
 
         if self.strategy.inited:
@@ -574,7 +629,8 @@ class BacktestingEngine:
             # Push not traded status update
             if order.status == Status.SUBMITTING:
                 order.status = Status.NOTTRADED
-                self.strategy.update_order(order)
+                # self.strategy.update_order(order) # 收到了 接受submit回报
+                self.strategy.on_order(order)
 
             # Check if order can be crossed
             long_cross: bool = (
@@ -595,10 +651,11 @@ class BacktestingEngine:
             # Push traded status update
             order.traded = order.volume
             order.status = Status.ALLTRADED
-            self.strategy.update_order(order)
+            # self.strategy.update_order(order) # 成交回报
+            self.strategy.on_order(order)
 
             if order.vt_orderid in self.active_limit_orders:
-                self.active_limit_orders.pop(order.vt_orderid)
+                self.active_limit_orders.pop(order.vt_orderid) 
 
             # Push trade data
             self.trade_count += 1
@@ -607,7 +664,6 @@ class BacktestingEngine:
                 trade_price = min(order.price, long_best_price)
             else:
                 trade_price = max(order.price, short_best_price)
-
             trade: TradeData = TradeData(
                 symbol=order.symbol,
                 exchange=order.exchange,
@@ -619,11 +675,90 @@ class BacktestingEngine:
                 volume=order.volume,
                 datetime=self.datetime,
                 gateway_name=self.gateway_name,
+                reason=order.reason
             )
 
             self.strategy.update_trade(trade)
             self.trades[trade.vt_tradeid] = trade
 
+    
+    def _cross_stop_order(self):
+        for stop_order in list(self.active_stop_orders.values()):
+            bar: BarData = self.bars[stop_order.vt_symbol]
+            long_cross_price = bar.high_price
+            short_cross_price = bar.low_price
+            long_best_price = bar.open_price
+            short_best_price = bar.open_price
+            
+            
+            long_cross: bool = (
+                stop_order.direction == Direction.LONG
+                and stop_order.price <= long_cross_price
+            )
+
+            short_cross: bool = (
+                stop_order.direction == Direction.SHORT
+                and stop_order.price >= short_cross_price
+            )
+
+            if not long_cross and not short_cross:
+                continue
+
+            # Create order data.
+            self.limit_order_count += 1
+            
+            order: OrderData = OrderData(
+                symbol=stop_order.symbol,
+                exchange=stop_order.exchange,
+                orderid=str(self.limit_order_count),
+                direction=stop_order.direction,
+                offset=stop_order.offset,
+                price=stop_order.price,
+                volume=stop_order.volume,
+                traded=stop_order.volume,
+                status=Status.ALLTRADED,
+                gateway_name=self.gateway_name,
+                datetime=self.datetime,
+                reason = stop_order.reason
+            )
+            
+            self.limit_orders[order.vt_orderid] = order
+            
+            if long_cross:
+                trade_price = max(stop_order.price, long_best_price)
+            else:
+                trade_price = min(stop_order.price, short_best_price)
+                
+            self.trade_count += 1
+            
+            trade: TradeData = TradeData(
+                symbol=order.symbol,
+                exchange=order.exchange,
+                orderid=order.orderid,
+                tradeid=str(self.trade_count),
+                direction=order.direction,
+                offset=order.offset,
+                price=trade_price,
+                volume=order.volume,
+                datetime=self.datetime,
+                gateway_name=self.gateway_name,
+                reason=stop_order.reason
+            )
+            
+            stop_order.vt_orderids.append(order.vt_orderid)
+            stop_order.status = StopOrderStatus.TRIGGERED
+            
+            if stop_order.stop_orderid in self.active_stop_orders:
+                self.active_stop_orders.pop(stop_order.stop_orderid)
+            
+            self.strategy.on_stop_order(stop_order)
+            self.strategy.on_order(order)
+
+            self.strategy.update_trade(trade)
+            self.trades[trade.vt_tradeid] = trade
+            
+                 
+    
     def new_table(
         self,
         vt_symbols: list[str],
@@ -661,8 +796,15 @@ class BacktestingEngine:
         offset: Offset,
         price: float,
         volume: float,
+        reason: str = "",
+        stop: bool = False
     ) -> str:
         """Send new order"""
+        
+        if stop:
+            vt_orderid: str = self.send_stop_order(vt_symbol, direction, offset, price, volume, reason)
+            return vt_orderid
+        
         price: float = round_to(price, self.priceticks[vt_symbol])
         symbol, exchange = extract_vt_symbol(vt_symbol)
 
@@ -679,22 +821,84 @@ class BacktestingEngine:
             status=Status.SUBMITTING,
             datetime=self.datetime,
             gateway_name=self.gateway_name,
+            reason=reason
         )
 
         self.active_limit_orders[order.vt_orderid] = order
         self.limit_orders[order.vt_orderid] = order
-
         return order.vt_orderid
+    
+    
+    def send_stop_order(
+        self,
+        vt_symbol: str,
+        direction: Direction,
+        offset: Offset,
+        price: float,
+        volume: float,
+        reason:str = ""
+    ):
+        
+        price: float = round_to(price, self.priceticks[vt_symbol])
+        symbol, exchange = extract_vt_symbol(vt_symbol)
+        
+        self.stop_order_count += 1
+        stop_order: StopOrder = StopOrder(
+            symbol=symbol,
+            exchange=exchange,
+            direction=direction,
+            offset=offset,
+            price=price,
+            volume=volume,
+            datetime=self.datetime,
+            stop_orderid=f"{STOPORDER_PREFIX}.{self.stop_order_count}",
+            strategy_name=self.strategy.strategy_name,
+            reason=reason
+        )
+        
+        self.active_stop_orders[stop_order.stop_orderid] = stop_order
+        self.stop_orders[stop_order.stop_orderid] = stop_order
+        
+        return stop_order.stop_orderid
 
     def cancel_order(self, strategy: StrategyTemplate, vt_orderid: str) -> None:
         """Cancel existing order"""
+        if vt_orderid.startswith(STOPORDER_PREFIX):
+            self.cancel_stop_order(strategy, vt_orderid)
+        else:
+            self.cancel_limit_order(strategy, vt_orderid)
+    
+    
+    def cancel_limit_order(self, strategy: StrategyTemplate, vt_orderid: str) -> None:
+        """Cancel existing order"""
+        
+        if vt_orderid.startswith(STOPORDER_PREFIX):
+            self.cancel_stop_order(vt_orderid)
+            return
+        
         if vt_orderid not in self.active_limit_orders:
             return
         order: OrderData = self.active_limit_orders.pop(vt_orderid)
 
         order.status = Status.CANCELLED
-        self.strategy.update_order(order)
+        # self.strategy.update_order(order)
+        self.strategy.on_order(order)
+        
+    def cancel_stop_order(self, strategy: StrategyTemplate, vt_orderid: str):
+        if vt_orderid not in self.active_stop_orders:
+            return
+        stop_order: StopOrder = self.active_stop_orders.pop(vt_orderid)
 
+        stop_order.status = StopOrderStatus.CANCELLED
+        self.strategy.on_stop_order(stop_order)
+        
+    def cancel_all(self,strategy: StrategyTemplate):
+        for vt_orderid in list(self.active_limit_orders.keys()):
+            self.cancel_limit_order(strategy, vt_orderid)
+            
+        for vt_orderid in list(self.active_stop_orders.keys()):
+            self.cancel_stop_order(strategy, vt_orderid)
+            
     def write_log(self, msg: str, strategy: StrategyTemplate = None) -> None:
         """Write log message"""
         msg: str = f"{self.datetime}\t{msg}"
@@ -791,7 +995,7 @@ class ContractDailyResult:
             self.slippage += trade.volume * size * slippage
             self.turnover += turnover
             self.commission += turnover * rate
-
+ 
         # Calculate daily pnl
         self.total_pnl = self.trading_pnl + self.holding_pnl
         self.net_pnl = self.total_pnl - self.commission - self.slippage
@@ -840,6 +1044,7 @@ class PortfolioDailyResult:
         slippages: dict[str, float],
     ) -> None:
         """Calculate today pnl"""
+        # 这两个值不影响结果
         self.pre_closes = pre_closes
         self.start_poses = start_poses
 
