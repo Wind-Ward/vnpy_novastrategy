@@ -1,12 +1,11 @@
 from typing import Optional
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import numpy as np
 import pandas as pd
 
 from vnpy.trader.object import BarData
 from vnpy.trader.constant import Interval
-
 from .expression import calculate_by_expression
 
 
@@ -34,7 +33,7 @@ class DataTable:
         self.df: pd.DataFrame = None
         self.ix: int = 0
         self.inited: bool = False
-        self.periods: int = size * 100
+        self.periods: int = size * 50
 
         self.feature_expressions: dict[str, str] = {}
 
@@ -94,14 +93,16 @@ class LiveDataTable(DataTable):
     def _update_minute_bars(self, bars: dict[str, BarData]) -> bool:
         """Update minute bars to aggregate window bars"""
         window_bars: dict = {}
-
         for vt_symbol, bar in bars.items():
+            
+            print("bar datetime1",bar.datetime)
             bg: DataAggregator = self.aggregators[vt_symbol]
             window_bar: BarData = bg.update_bar(bar)
             if window_bar:
                 window_bars[vt_symbol] = window_bar
 
         if window_bars:
+            print("window_bars",window_bars)
             self._update_window_bars(bars)
             return self.inited
         else:
@@ -117,7 +118,7 @@ class LiveDataTable(DataTable):
 
         # Update data into DF
         df: pd.DataFrame = self.df
-
+        
         for bar in bars.values():
             data: list = [
                 bar.open_price,
@@ -132,7 +133,7 @@ class LiveDataTable(DataTable):
             for field in self.extra_fields:
                 value: object = bar.extra.get(field, None)
                 data.append(value)
-
+            print("bar datetime",bar.datetime)
             df.loc[(bar.datetime, bar.vt_symbol)] = data
 
         # Update latest index
@@ -149,16 +150,15 @@ class LiveDataTable(DataTable):
         bar: BarData = list(bars.values())[0]
 
         dt_index: pd.DatetimeIndex = pd.date_range(
-            start=bar.datetime,
+            start=bar.datetime+timedelta(minutes=self.agg_window),
             periods=self.periods,
-            freq=self.interval_freq_map[self.interval]
+            freq=f"{self.agg_window}{self.interval_freq_map[self.interval]}"
         )
 
         multi_index: pd.MultiIndex = pd.MultiIndex.from_product(
             [dt_index, self.vt_symbols],
             names=["datetime", "vt_symbol"]
         )
-
         columns: list[str] = [
             "open_price",
             "high_price",
@@ -175,7 +175,6 @@ class LiveDataTable(DataTable):
             index=multi_index,
             columns=columns
         )
-
         self.ix = 0
 
     def _reset_df(self, bars: dict[str, BarData]) -> None:
@@ -215,7 +214,6 @@ class LiveDataTable(DataTable):
 
         fill_ix: int = len(self.vt_symbols) * self.size
         self.df.iloc[:fill_ix] = old_df.iloc[-fill_ix:]
-
         self.ix = self.size
 
     def get_df(self) -> Optional[pd.DataFrame]:
@@ -229,10 +227,75 @@ class LiveDataTable(DataTable):
 
         df: pd.DataFrame = self.df.iloc[start_ix: end_ix].copy()
 
-        for name, expression in self.feature_expressions.items():
-            df[name] = calculate_by_expression(df, expression)
+        # for name, expression in self.feature_expressions.items():
+        #     df[name] = calculate_by_expression(df, expression)
 
         return df
+    
+    def update_history(self, history: list[dict[str, BarData]]) -> None:
+        """Update bars history into table"""
+        if self.agg_window == 1:
+            # for bars in history:
+            #     for bar in bars.values():
+            #         self.window_ends.append(bar.datetime)
+            #         break
+
+            self._update_history(history)
+        else:
+            window_history: list = []
+            for bars in history:
+                window_bars: dict = {}
+
+                for vt_symbol, bar in bars.items():
+                    bg: DataAggregator = self.aggregators[vt_symbol]
+                    window_bar: BarData = bg.update_bar(bar)
+                    if window_bar:
+                        window_bars[vt_symbol] = window_bar
+
+                if window_bars:
+                    window_history.append(window_bars)
+                    # self.window_ends.append(bar.datetime)
+
+            self._update_history(window_history)
+
+    def _update_history(self, history: list[dict[str, BarData]]) -> None:
+        """Update bars history into table"""
+        # 合并数据列表
+        records: list[dict] = []
+        
+        for bars in history:
+            for bar in bars.values():
+                d: dict = {
+                    "datetime": bar.datetime,
+                    "vt_symbol": bar.vt_symbol,
+                    "open_price": bar.open_price,
+                    "high_price": bar.high_price,
+                    "low_price": bar.low_price,
+                    "close_price": bar.close_price,
+                    "volume": bar.volume,
+                    "turnover": bar.turnover,
+                    "open_interest": bar.open_interest
+                }
+
+                for field in self.extra_fields:
+                    d[field] = bar.extra.get(field, None)
+
+                records.append(d)
+
+        # 创建DataFrame
+        df: pd.DataFrame = pd.DataFrame.from_records(records)
+        df.set_index(["datetime", "vt_symbol"], inplace=True)
+        # 计算特征列
+        # for name, expression in self.feature_expressions.items():
+        #     df[name] = calculate_by_expression(df, expression)
+        if self.df is None:
+            self._init_df(history[-1])
+        print("df",df)
+        print("self.df",self.df)
+        self.df = pd.concat([df,self.df])
+        self.ix = len(records)
+        # 完成数据准备
+        self.inited = True
 
 
 class BacktestingDataTable(DataTable):
@@ -259,7 +322,7 @@ class BacktestingDataTable(DataTable):
         for bar in bars.values():
             dt: datetime = bar.datetime
             break
-
+        
         if dt == self.next_end:
             self.ix += 1
 
@@ -281,7 +344,6 @@ class BacktestingDataTable(DataTable):
             self._update_history(history)
         else:
             window_history: list = []
-
             for bars in history:
                 window_bars: dict = {}
 

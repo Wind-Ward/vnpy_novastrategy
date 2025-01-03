@@ -133,7 +133,8 @@ class StrategyEngine(BaseEngine):
         offset: Offset,
         price: float,
         volume: float,
-        reason: str = ""
+        reason: str = "", 
+        stop:bool = False
     ) -> list:
         """Send new order"""
         contract: Optional[ContractData] = self.main_engine.get_contract(vt_symbol)
@@ -143,13 +144,17 @@ class StrategyEngine(BaseEngine):
 
         price: float = round_to(price, contract.pricetick)
         volume: float = round_to(volume, contract.min_volume)
+        if stop:
+            order_type = OrderType.STOP
+        else:
+            order_type = OrderType.LIMIT
 
         req: OrderRequest = OrderRequest(
             symbol=contract.symbol,
             exchange=contract.exchange,
             direction=direction,
             offset=offset,
-            type=OrderType.LIMIT,
+            type=order_type,
             price=price,
             volume=volume,
             reference=f"{APP_NAME}_{strategy.strategy_name}"

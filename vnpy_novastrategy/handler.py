@@ -25,7 +25,6 @@ class TickHandler:
         bar: BarData = tick.extra.get("bar", None)
         if not bar:
             return
-
         if self.closed_dt and bar.datetime < self.closed_dt:
             return
 
